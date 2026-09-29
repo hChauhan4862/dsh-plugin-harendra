@@ -1,0 +1,30 @@
+{
+  "name": "dsh-plugin-harendra",
+  "version": "3.0.0",
+  "description": "DSH Harness Web UI plugin: focus timer, water reminder, four distinct alert sounds, a tab favicon that reflects agent state, and a DeepSeek peak/off-peak rate badge.",
+  "license": "MIT",
+  "author": "Harendra Chauhan",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hChauhan4862/dsh-plugin-harendra.git"
+  },
+  "keywords": ["dsh", "dsh-plugin", "cordis", "deepseek", "pomodoro", "pricing"],
+  "type": "module",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": ["index.js", "client.js", "cordis.patch.yml", "icon.svg", "locale/*.json"],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-conversation"]
+    }
+  }
+}

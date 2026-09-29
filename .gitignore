@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# Dependencies
+node_modules/
+
+# Logs and editor files
+*.log
+npm-debug.log*
+.idea/
+.vscode/
+
+# Local scratch files
+.tmp-*
+*.local

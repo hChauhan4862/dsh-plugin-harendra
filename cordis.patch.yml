@@ -1,0 +1,9 @@
+# dsh-plugin-harendra: one package, one row, five features in one client module.
+#
+# The features are deliberately not separate plugin rows: the browser roster is
+# keyed by package name, so one switchable row per feature would need one package
+# per feature. This package ships them together instead, and they are switched on
+# and off individually from the plugin's own HC panel in the sidebar foot.
+- insert:
+    - id: dsh-plugin-harendra
+      name: 'dsh-plugin-harendra'

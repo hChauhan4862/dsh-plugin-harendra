@@ -74,9 +74,33 @@ jobs:
           echo "::error::npm refused the publish. npm said: ${detail} -- Usual causes: (1) a stage-only token cannot publish directly, so use a classic Automation token or granular with 'Read and write (publish and stage)'; (2) a token scoped to specific packages cannot cover a package that does not exist yet, so choose 'All packages' for the first release; (3) the token lacks 2FA bypass, or has expired. Trusted publishing (OIDC) avoids tokens entirely once the package exists."
           exit 1
 
-      - name: Confirm the published version
+      # A stage-only token uploads the version and exits 0 without going live, so a
+      # green Publish step alone is not proof. Ask the registry instead.
+      - name: Confirm the version is live
         if: steps.publish.outcome == 'success'
         run: |
+          name="$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).name")"
           version="$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).version")"
-          echo "Published dsh-plugin-harendra@$version" >> "$GITHUB_STEP_SUMMARY"
-          echo "https://www.npmjs.com/package/dsh-plugin-harendra" >> "$GITHUB_STEP_SUMMARY"
+          live=""
+          for attempt in 1 2 3 4 5 6; do
+            if npm view "$name@$version" version > /dev/null 2>&1; then live="yes"; break; fi
+            sleep 5
+          done
+          if [ -n "$live" ]; then
+            {
+              echo "### Live on npm"
+              echo "$name@$version — https://www.npmjs.com/package/$name"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "verified live: $name@$version"
+          else
+            {
+              echo "### Staged, not published"
+              echo "\`$name@$version\` is not on the registry, so this was a staged publish."
+              echo "Approve it on npmjs.com (avatar → Staged Packages) to release it, or use a token"
+              echo "that may publish directly."
+              echo '```'
+              tail -20 publish.log || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::$name@$version did not reach the registry. If the token is stage-only, approve it under Staged Packages on npmjs.com; otherwise switch to a token that may publish directly."
+          fi

@@ -1,5 +1,9 @@
 # dsh-plugin-harendra
 
+[![CI](https://github.com/hChauhan4862/dsh-plugin-harendra/actions/workflows/ci.yml/badge.svg)](https://github.com/hChauhan4862/dsh-plugin-harendra/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/dsh-plugin-harendra.svg)](https://www.npmjs.com/package/dsh-plugin-harendra)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A personal [DSH Harness](https://github.com/deepseek-ai) Web UI plugin: everything I kept wanting
 beside the composer and the sidebar — a focus timer, a water reminder, distinct alert sounds for the
 events that actually need me, a tab favicon that shows what the agent is doing, and a DeepSeek
@@ -54,16 +58,34 @@ its provenance.
 
 ## Install
 
-Install it into your profile as a bundle, pointing at this package directory:
+Published to npm as `dsh-plugin-harendra`, so install it by name:
 
 ```
-plugin_manager(action: "install_bundle", target: "/absolute/path/to/dsh-plugin-harendra")
+plugin_manager(action: "install_bundle", target: "dsh-plugin-harendra")
 ```
 
-Or, with the Harness CLI, add the package to your profile and restart. The bundle patch inserts a
-single row named `dsh-plugin-harendra`; its Client half is served automatically.
+Installing from a checkout works the same way — point `target` at the package directory instead. With
+the Harness CLI you can also add the package to your profile by hand and restart. Either way the
+bundle patch inserts a single row named `dsh-plugin-harendra`, and its Client half is served
+automatically.
 
 To remove it, `plugin_manager(action: "remove_bundle", target: "dsh-plugin-harendra")`.
+
+## Updating
+
+There is **no auto-update**, by design: the harness installs, removes, enables and disables bundles,
+and resolves versions only at install time — it never polls for new releases. Updating is one
+command, re-run after a new version is published:
+
+```
+plugin_manager(action: "install_bundle", target: "dsh-plugin-harendra")
+```
+
+pnpm re-resolves the range and picks up the newest published version. A `link:` install (a checkout
+on disk) needs no update at all, since the profile reads the live directory.
+
+If you granted a version exemption for an incompatible release, note that exemptions are recorded per
+exact `package@version` and do not carry over to the next one.
 
 ## Usage
 
@@ -103,6 +125,28 @@ listener and subscription is registered with `ctx.effect` and cleaned up on unlo
 - The pricing schedule is third-party data; the plugin shows where it came from rather than
   presenting it as authoritative.
 - The focus timer and water reminder are conveniences, not medical or productivity advice.
+
+## Releasing
+
+1. Bump `version` in `package.json`.
+2. Commit and push to `main`.
+3. Tag the release and push the tag:
+
+```
+git tag v3.0.1
+git push origin v3.0.1
+```
+
+The `Publish to npm` workflow refuses a tag that disagrees with `package.json`, validates the
+package, and then publishes it with a provenance attestation. It reads an npm automation token from
+the repository secret `NPM_TOKEN` (Settings → Secrets and variables → Actions).
+
+To use npm's trusted publishing instead of a long-lived token, add this repository and the
+`publish.yml` workflow as a trusted publisher on npmjs.com, then drop the `NODE_AUTH_TOKEN` wiring
+and the token guard from the workflow.
+
+`CI` runs on every push and pull request and checks the syntax, the manifests, the bundle wiring and
+locale parity — so a broken client module fails before it can be published.
 
 ## License
 

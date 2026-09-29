@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out
         uses: actions/checkout@v5
@@ -53,6 +53,30 @@ jobs:
           fi
 
       - name: Publish
-        run: npm publish --access public --provenance
+        id: publish
+        continue-on-error: true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance 2>&1 | tee publish.log
+
+      # npm's own refusal is the useful part of a failure, so it is surfaced in the
+      # run summary and annotated with the usual causes instead of a bare exit code.
+      - name: Explain a failed publish
+        if: steps.publish.outcome == 'failure'
+        run: |
+          detail="$(grep -v '^$' publish.log 2>/dev/null | tail -3 | tr '\n' ' ' | cut -c1-400)"
+          {
+            echo "### npm publish failed"
+            echo '```'
+            tail -40 publish.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::npm refused the publish. npm said: ${detail} -- Usual causes: (1) a stage-only token cannot publish directly, so use a classic Automation token or granular with 'Read and write (publish and stage)'; (2) a token scoped to specific packages cannot cover a package that does not exist yet, so choose 'All packages' for the first release; (3) the token lacks 2FA bypass, or has expired. Trusted publishing (OIDC) avoids tokens entirely once the package exists."
+          exit 1
+
+      - name: Confirm the published version
+        if: steps.publish.outcome == 'success'
+        run: |
+          version="$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).version")"
+          echo "Published dsh-plugin-harendra@$version" >> "$GITHUB_STEP_SUMMARY"
+          echo "https://www.npmjs.com/package/dsh-plugin-harendra" >> "$GITHUB_STEP_SUMMARY"

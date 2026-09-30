@@ -57,7 +57,11 @@ jobs:
         continue-on-error: true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public --provenance 2>&1 | tee publish.log
+        run: |
+          # pipefail matters here: without it a pipeline reports tee's status, so a
+          # failed publish looked like a green step and the explanation never ran.
+          set -o pipefail
+          npm publish --access public --provenance 2>&1 | tee publish.log
 
       # npm's own refusal is the useful part of a failure, so it is surfaced in the
       # run summary and annotated with the usual causes instead of a bare exit code.
@@ -71,7 +75,7 @@ jobs:
             tail -40 publish.log || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "::error::npm refused the publish. npm said: ${detail} -- Usual causes: (1) a stage-only token cannot publish directly, so use a classic Automation token or granular with 'Read and write (publish and stage)'; (2) a token scoped to specific packages cannot cover a package that does not exist yet, so choose 'All packages' for the first release; (3) the token lacks 2FA bypass, or has expired. Trusted publishing (OIDC) avoids tokens entirely once the package exists."
+          echo "::error::npm refused the publish. npm said: ${detail} -- Usual causes: (1) the token has no publish permission for this package, or is scoped to packages while this one does not exist yet; (2) the token is expired, revoked or mistyped; (3) the account requires 2FA for writes and the token does not bypass it, in which case use a classic Automation token; (4) this version already exists on the registry. Trusted publishing (OIDC) avoids tokens entirely once the package exists."
           exit 1
 
       # A stage-only token uploads the version and exits 0 without going live, so a
@@ -94,13 +98,31 @@ jobs:
             echo "verified live: $name@$version"
           else
             {
-              echo "### Staged, not published"
-              echo "\`$name@$version\` is not on the registry, so this was a staged publish."
-              echo "Approve it on npmjs.com (avatar → Staged Packages) to release it, or use a token"
-              echo "that may publish directly."
+              echo "### Published, but the registry does not list it"
+              echo "\`$name@$version\` is absent from the registry after a successful publish."
+              echo "The npm output is in the annotation on the 'Show what npm reported' step."
               echo '```'
               tail -20 publish.log || true
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::warning::$name@$version did not reach the registry. If the token is stage-only, approve it under Staged Packages on npmjs.com; otherwise switch to a token that may publish directly."
+            echo "::warning::$name@$version did not reach the registry even though npm exited 0. Read the npm output annotation on this run."
           fi
+
+      # npm's output is the evidence, and Actions logs need admin rights to download
+      # even on a public repository. Republishing the tail as an annotation makes it
+      # readable by anyone, including a reviewer or an agent.
+      - name: Show what npm reported
+        if: always()
+        run: |
+          if [ ! -f publish.log ]; then
+            echo "::notice::No publish.log was produced, so the run stopped before publishing."
+            exit 0
+          fi
+          {
+            echo "### npm publish output"
+            echo '```'
+            tail -30 publish.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          detail="$(grep -v '^[[:space:]]*$' publish.log | tail -6 | tr '\n' '~' | cut -c1-900)"
+          echo "::notice::npm publish output: ${detail}"

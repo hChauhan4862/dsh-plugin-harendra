@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Validate syntax and manifests
+        run: |
+          node --check client.js
+          node --check index.js
+          node -e "for (const f of ['package.json','locale/en.json','locale/zh.json']) JSON.parse(require('fs').readFileSync(f,'utf8')); console.log('manifests parse')"
+
+      - name: Check the bundle wiring
+        run: |
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            if (pkg.private === true) throw new Error('package.json must not be private to publish');
+            if (!pkg.dsh || !pkg.dsh.bundle || !pkg.dsh.bundle.patch) throw new Error('missing dsh.bundle.patch');
+            if (!pkg.dsh.client) throw new Error('missing dsh.client');
+            const client = fs.readFileSync('client.js', 'utf8');
+            for (const id of ['harendra-settings', 'harendra-water', 'harendra-sound', 'harendra-peak', 'harendra-pomodoro']) {
+              if (!client.includes(id)) throw new Error('client.js is missing the ' + id + ' entry');
+            }
+            console.log('bundle wiring and client entries ok');
+          "
+
+      - name: Check locale parity
+        run: |
+          node -e "
+            const fs = require('fs');
+            const client = fs.readFileSync('client.js', 'utf8');
+            const start = client.indexOf('en: {');
+            const split = client.indexOf('zh: {');
+            const end = client.indexOf('};', split);
+            const keys = (text) => [...text.matchAll(/^\s+([A-Za-z][A-Za-z0-9]*):/gm)].map((m) => m[1]);
+            const en = keys(client.slice(start, split));
+            const zh = keys(client.slice(split, end));
+            const missing = en.filter((k) => !zh.includes(k)).concat(zh.filter((k) => !en.includes(k)));
+            if (missing.length > 0) throw new Error('locale keys differ: ' + missing.join(', '));
+            console.log('locale parity ok across ' + en.length + ' keys');
+          "

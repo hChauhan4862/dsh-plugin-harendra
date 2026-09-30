@@ -19,6 +19,9 @@
     "./locale/*.json": "./locale/*.json"
   },
   "files": ["index.js", "client.js", "cordis.patch.yml", "icon.svg", "locale/*.json"],
+  "publishConfig": {
+    "access": "public"
+  },
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },
     "client": {

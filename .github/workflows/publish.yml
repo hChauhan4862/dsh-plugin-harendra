@@ -1,0 +1,120 @@
+name: Publish to npm
+
+# Publishes on a version tag, e.g.
+#   git tag v3.0.1 && git push origin v3.0.1
+# workflow_dispatch lets a maintainer re-run a release from the Actions tab.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # required for the provenance attestation
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Validate the package
+        run: |
+          node --check client.js
+          node --check index.js
+          node -e "for (const f of ['package.json','locale/en.json','locale/zh.json']) JSON.parse(require('fs').readFileSync(f,'utf8'))"
+          echo "package validates"
+
+      - name: Check the tag against package.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).version")"
+          echo "tag=$tag package.json=$version"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $version. Bump one of them."
+            exit 1
+          fi
+
+      - name: Publish
+        id: publish
+        continue-on-error: true
+        run: |
+          # Publishing uses npm trusted publishing (OIDC): no token is stored anywhere,
+          # and the short-lived credential npm mints satisfies the account's
+          # two-factor-for-writes policy instead of trying to bypass it.
+          # Setup, once per package: npm trust github <package> --file publish.yml
+          # --repo <owner>/<repo>
+          set -o pipefail
+          npm publish --access public --provenance 2>&1 | tee publish.log
+
+      # npm's own refusal is the useful part of a failure, so it is surfaced in the
+      # run summary and annotated with the usual causes instead of a bare exit code.
+      - name: Explain a failed publish
+        if: steps.publish.outcome == 'failure'
+        run: |
+          detail="$(grep -v '^$' publish.log 2>/dev/null | tail -3 | tr '\n' ' ' | cut -c1-400)"
+          {
+            echo "### npm publish failed"
+            echo '```'
+            tail -40 publish.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::npm refused the publish. npm said: ${detail} -- Usual causes: (1) the package has no trusted publisher configured for this repository and workflow, so run 'npm trust github <package> --file publish.yml --repo <owner>/<repo>' once; (2) this version already exists on the registry; (3) the OIDC exchange failed, so check that this workflow keeps 'id-token: write'."
+          exit 1
+
+      # A stage-only token uploads the version and exits 0 without going live, so a
+      # green Publish step alone is not proof. Ask the registry instead.
+      - name: Confirm the version is live
+        if: steps.publish.outcome == 'success'
+        run: |
+          name="$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).name")"
+          version="$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).version")"
+          live=""
+          for attempt in 1 2 3 4 5 6; do
+            if npm view "$name@$version" version > /dev/null 2>&1; then live="yes"; break; fi
+            sleep 5
+          done
+          if [ -n "$live" ]; then
+            {
+              echo "### Live on npm"
+              echo "$name@$version — https://www.npmjs.com/package/$name"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "verified live: $name@$version"
+          else
+            {
+              echo "### Published, but the registry does not list it"
+              echo "\`$name@$version\` is absent from the registry after a successful publish."
+              echo "The npm output is in the annotation on the 'Show what npm reported' step."
+              echo '```'
+              tail -20 publish.log || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::$name@$version did not reach the registry even though npm exited 0. Read the npm output annotation on this run."
+          fi
+
+      # npm's output is the evidence, and Actions logs need admin rights to download
+      # even on a public repository. Republishing the tail as an annotation makes it
+      # readable by anyone, including a reviewer or an agent.
+      - name: Show what npm reported
+        if: always()
+        run: |
+          if [ ! -f publish.log ]; then
+            echo "::notice::No publish.log was produced, so the run stopped before publishing."
+            exit 0
+          fi
+          {
+            echo "### npm publish output"
+            echo '```'
+            tail -30 publish.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          detail="$(grep -v '^[[:space:]]*$' publish.log | tail -6 | tr '\n' '~' | cut -c1-900)"
+          echo "::notice::npm publish output: ${detail}"

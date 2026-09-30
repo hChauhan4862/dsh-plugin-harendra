@@ -46,6 +46,13 @@ window.__ModuleLoader__.load({
     const WATER_SNOOZE_MS = 5 * 60 * 1000;
     const WATER_MINUTES = WATER_INTERVAL_MS / 60000;
     const WATER_SNOOZE_MINUTES = WATER_SNOOZE_MS / 60000;
+    /** Completed days kept in the browser, newest first. */
+    const WATER_HISTORY_DAYS = 3;
+    /**
+     * The shape dayKey() writes; a stored entry is trusted only if it matches.
+     * The groups are what the history labels read back as month and day.
+     */
+    const WATER_DAY_KEY = /^(\d{4})-(\d{1,2})-(\d{1,2})$/;
 
     const DICTS = {
       en: {
@@ -67,6 +74,12 @@ window.__ModuleLoader__.load({
         waterDrank: 'I drank water',
         waterLater: 'In {minutes} min',
         waterClose: 'Close',
+        waterHistory: 'Last {days} days',
+        waterToday: 'Today',
+        waterYesterday: 'Yesterday',
+        waterHistoryEmpty: 'No earlier days yet',
+        waterGlassOne: '{count} glass',
+        waterGlassMany: '{count} glasses',
         soundHeading: 'Alert sound',
         soundButton: 'Alert sound: {mode}',
         soundAlways: 'Always',
@@ -126,6 +139,12 @@ window.__ModuleLoader__.load({
         waterDrank: '我喝了',
         waterLater: '{minutes} 分钟后',
         waterClose: '关闭',
+        waterHistory: '最近 {days} 天',
+        waterToday: '今天',
+        waterYesterday: '昨天',
+        waterHistoryEmpty: '暂无更早记录',
+        waterGlassOne: '{count} 杯',
+        waterGlassMany: '{count} 杯',
         soundHeading: '提示音',
         soundButton: '提示音：{mode}',
         soundAlways: '始终播放',
@@ -170,10 +189,23 @@ window.__ModuleLoader__.load({
 
     // ---------------------------------------------------------------- shared
 
-    /** Local calendar day, used to reset the glass count. */
-    function today() {
-      const date = new Date();
+    /**
+     * Local calendar key used to reset the glass count, shared with the stored
+     * history and the labels that read it back.
+     */
+    function dayKey(date) {
       return date.getFullYear() + '-' + (date.getMonth() + 1) + '-' + date.getDate();
+    }
+
+    function today() {
+      return dayKey(new Date());
+    }
+
+    /** The key for a day `days` before today; setDate handles month and DST edges. */
+    function dayKeyAgo(days) {
+      const date = new Date();
+      date.setDate(date.getDate() - days);
+      return dayKey(date);
     }
 
     function readStored(key) {
@@ -713,26 +745,55 @@ window.__ModuleLoader__.load({
 
     // ------------------------------------------------------------------ water
 
+    /** Stored entries are trusted only after their day and count have been checked. */
+    function normalizeWaterHistory(raw) {
+      if (!Array.isArray(raw) || raw.length === 0) return [];
+      const seen = new Set();
+      const list = [];
+      for (const entry of raw) {
+        if (!entry || typeof entry.day !== 'string' || !WATER_DAY_KEY.test(entry.day)) continue;
+        if (seen.has(entry.day)) continue;
+        seen.add(entry.day);
+        list.push({ day: entry.day, glasses: Number.isFinite(entry.glasses) && entry.glasses > 0 ? Math.floor(entry.glasses) : 0 });
+      }
+      return list.slice(0, WATER_HISTORY_DAYS);
+    }
+
+    /** Archive a finished day at the head of the list, dropping anything past the window. */
+    function archiveWaterDay(history, day, glasses) {
+      const kept = normalizeWaterHistory(history).filter((entry) => entry.day !== day);
+      if (typeof day !== 'string' || !WATER_DAY_KEY.test(day)) return kept;
+      const count = Number.isFinite(glasses) && glasses > 0 ? Math.floor(glasses) : 0;
+      return [{ day, glasses: count }, ...kept].slice(0, WATER_HISTORY_DAYS);
+    }
+
     /** Restore the cycle; an overdue deadline is already due when the page opens. */
     function restoreWater() {
       const now = Date.now();
       const day = today();
       const saved = readStored(WATER_KEY);
       if (!saved || !Number.isFinite(saved.nextDueAt)) {
-        return { lastDrinkAt: now, nextDueAt: now + WATER_INTERVAL_MS, remainingMs: WATER_INTERVAL_MS, glasses: 0, day, due: false, manualOpen: false };
+        return { lastDrinkAt: now, nextDueAt: now + WATER_INTERVAL_MS, remainingMs: WATER_INTERVAL_MS, glasses: 0, day, history: [], due: false, manualOpen: false };
       }
       const glasses = Number.isFinite(saved.glasses) && saved.glasses > 0 ? Math.floor(saved.glasses) : 0;
       const nextDueAt = saved.nextDueAt;
       const remainingMs = Math.max(0, nextDueAt - now);
-      return {
+      const rolled = saved.day !== day;
+      const history = rolled ? archiveWaterDay(saved.history, saved.day, glasses) : normalizeWaterHistory(saved.history);
+      const state = {
         lastDrinkAt: Number.isFinite(saved.lastDrinkAt) ? saved.lastDrinkAt : now,
         nextDueAt,
         remainingMs,
-        glasses: saved.day === day ? glasses : 0,
+        glasses: rolled ? 0 : glasses,
         day,
+        history,
         due: remainingMs === 0,
         manualOpen: false,
       };
+      // A rollover that happened while the page was closed is archived right here:
+      // the next write may be a whole session away, and the finished count is gone.
+      if (rolled) writeStored(WATER_KEY, { lastDrinkAt: state.lastDrinkAt, nextDueAt, glasses: 0, day, history });
+      return state;
     }
 
     function createWaterStore() {
@@ -744,6 +805,7 @@ window.__ModuleLoader__.load({
         nextDueAt: state.nextDueAt,
         glasses: state.glasses,
         day: state.day,
+        history: state.history,
       });
       const notify = () => {
         for (const listener of [...listeners]) listener();
@@ -752,6 +814,16 @@ window.__ModuleLoader__.load({
         state = next;
         persist();
         notify();
+      };
+      /**
+       * The day-rollover patch, or null when the day has not changed. Every action
+       * passes through here, so no path can drop a finished day: a background tab
+       * may tick minutes late, and the first click of a new day must still archive.
+       */
+      const rollDay = () => {
+        const day = today();
+        if (state.day === day) return null;
+        return { day, glasses: 0, history: archiveWaterDay(state.history, state.day, state.glasses) };
       };
 
       return {
@@ -763,14 +835,14 @@ window.__ModuleLoader__.load({
         /** Confirmed: record the glass and start the next interval. */
         drink() {
           const now = Date.now();
-          const day = today();
+          const roll = rollDay();
           commit({
             ...state,
+            ...(roll || {}),
             lastDrinkAt: now,
             nextDueAt: now + WATER_INTERVAL_MS,
             remainingMs: WATER_INTERVAL_MS,
-            glasses: (state.day === day ? state.glasses : 0) + 1,
-            day,
+            glasses: (roll ? 0 : state.glasses) + 1,
             due: false,
             manualOpen: false,
           });
@@ -778,12 +850,12 @@ window.__ModuleLoader__.load({
         /** Not now: re-ask shortly instead of restarting the full interval. */
         later() {
           const now = Date.now();
-          commit({ ...state, nextDueAt: now + WATER_SNOOZE_MS, remainingMs: WATER_SNOOZE_MS, due: false, manualOpen: false });
+          commit({ ...state, ...(rollDay() || {}), nextDueAt: now + WATER_SNOOZE_MS, remainingMs: WATER_SNOOZE_MS, due: false, manualOpen: false });
         },
         /** Open the card from the bottle to check the countdown. */
         open() {
           const remainingMs = Math.max(0, state.nextDueAt - Date.now());
-          commit({ ...state, remainingMs, due: remainingMs === 0, manualOpen: true });
+          commit({ ...state, ...(rollDay() || {}), remainingMs, due: remainingMs === 0, manualOpen: true });
         },
         close() {
           commit({ ...state, manualOpen: false });
@@ -792,12 +864,11 @@ window.__ModuleLoader__.load({
           const now = Date.now();
           const remainingMs = Math.max(0, state.nextDueAt - now);
           const due = remainingMs === 0;
-          const day = today();
-          const rolled = state.day !== day;
+          const roll = rollDay();
           const minuteChanged = Math.ceil(remainingMs / 60000) !== Math.ceil(state.remainingMs / 60000);
-          if (due === state.due && !minuteChanged && !rolled) return;
-          state = { ...state, remainingMs, due, day, glasses: rolled ? 0 : state.glasses };
-          if (rolled) persist();
+          if (due === state.due && !minuteChanged && !roll) return;
+          state = { ...state, ...(roll || {}), remainingMs, due };
+          if (roll) persist();
           notify();
         },
       };
@@ -819,6 +890,14 @@ window.__ModuleLoader__.load({
     const pauseIcon = () => svg(h('path', { d: 'M6.2 4.1v7.8M9.8 4.1v7.8' }), 12);
     const resetIcon = () => svg(h('path', { d: 'M3.6 8a4.4 4.4 0 1 0 1.4-3.2M3.3 3.4v3.1h3.1' }), 12);
     const skipIcon = () => svg(h('path', { d: 'M4.2 3.9 9.8 8l-5.6 4.1z', fill: 'currentColor', stroke: 'none' }), 12);
+    /** Watch glyph: what sits beside the rate is a countdown to the next change. */
+    const watchIcon = () => h('svg', {
+      width: 11, height: 11, viewBox: '0 0 16 16', 'aria-hidden': true, focusable: false,
+      fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round',
+    },
+      h('circle', { cx: 8, cy: 8.3, r: 4.4 }),
+      h('path', { d: 'M8 6.1V8.6l1.7 1' }),
+      h('path', { d: 'M6.4 2.6h3.2M6.4 14h3.2' }));
 
     /** Bottle outline: the water level rises as the next reminder approaches. */
     const BOTTLE_BODY = 'M6.4 3.3h3.2v1.1c0 .5.2.9.6 1.3.9.8 1.4 1.9 1.4 3.1v4.3c0 .9-.7 1.6-1.6 1.6H6a1.6 1.6 0 0 1-1.6-1.6V8.8c0-1.2.5-2.3 1.4-3.1.4-.4.6-.8.6-1.3V3.3Z';
@@ -893,8 +972,18 @@ window.__ModuleLoader__.load({
       '.hp-outline{fill:none;stroke:currentColor;stroke-width:1.2;stroke-linejoin:round}',
       '.hp-cap{fill:currentColor;opacity:.8}',
       '.hp-water{fill:var(--dsw-alias-brand-primary)}',
+      // The bottle warms from the brand colour toward the alert colour as the
+      // interval runs out; --hp-heat is the elapsed share, set inline per render.
+      // The plain declaration above is the fallback where color-mix() is unknown.
+      '.hp-water{fill:color-mix(in oklab, var(--dsw-alias-state-warn-primary) var(--hp-heat, 0%), var(--dsw-alias-brand-primary))}',
       '.hp-btn[data-due="1"] .hp-water{fill:var(--dsw-alias-state-warn-primary)}',
       '.hp-layer{position:fixed;left:16px;bottom:72px;z-index:30;pointer-events:none}',
+      // A reminder that fires on its own takes the centre of the frame as a modal:
+      // the layer itself becomes the backdrop and swallows clicks until answered.
+      '.hp-layer[data-modal="1"]{left:0;right:0;top:0;bottom:0;z-index:60;display:flex;align-items:center;justify-content:center;',
+      'pointer-events:auto;background:color-mix(in srgb, var(--dsw-alias-bg-base) 70%, transparent)}',
+      '.hp-layer[data-modal="1"] .hp-card{width:300px;',
+      'box-shadow:0 18px 48px color-mix(in srgb, var(--dsw-alias-label-primary) 28%, transparent)}',
       '.hp-card{pointer-events:auto;box-sizing:border-box;width:264px;padding:12px;border-radius:12px;',
       'border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-overlay);color:var(--dsw-alias-label-primary);',
       'font-size:13px;line-height:18px;box-shadow:0 6px 20px color-mix(in srgb, var(--dsw-alias-label-primary) 16%, transparent)}',
@@ -909,6 +998,13 @@ window.__ModuleLoader__.load({
       '.hp-later{margin-left:auto}',
       '.hp-accept:hover,.hp-later:hover{background:var(--dsw-alias-bg-layer-2)}',
       '.hp-accept:focus-visible,.hp-later:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}',
+      '.hp-hist{margin-top:10px;padding-top:8px;border-top:1px solid var(--dsw-alias-border-l2)}',
+      '.hp-hist-title{margin-bottom:2px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary)}',
+      '.hp-day{display:flex;align-items:baseline;gap:8px;font-size:12px;line-height:18px}',
+      '.hp-day-name{color:var(--dsw-alias-label-secondary)}',
+      '.hp-day-count{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary)}',
+      '.hp-day[data-live="1"] .hp-day-count{color:var(--dsw-alias-brand-primary);font-weight:600}',
+      '.hp-hist-empty{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}',
     ].join('');
 
     /** The sound control and the mode menu it opens. */
@@ -1449,6 +1545,11 @@ window.__ModuleLoader__.load({
     const PEAK_CSS = [
       '.hp-peak-btn{font-size:11px;font-weight:600;font-variant-numeric:tabular-nums}',
       '.hp-peak-badge{font-weight:700}',
+      // Beside the rate sits the time left until it changes. The 56px rail has no
+      // room for that, so there the multiplier keeps the button to itself.
+      '.hp-peak-btn[data-wide="1"]{width:auto;padding:0 6px;gap:3px}',
+      '.hp-peak-btn[data-wide="0"] .hp-peak-when{display:none}',
+      '.hp-peak-when{display:inline-flex;align-items:center;gap:2px;font-weight:500;opacity:.8}',
       '.hp-peak-dot{width:9px;height:9px;border-radius:50%;background:currentColor}',
       '.hp-peak-btn[data-phase="peak"]{color:var(--dsw-alias-state-warn-primary)}',
       '.hp-peak-btn[data-phase="off"]{color:var(--dsw-alias-state-success-primary)}',
@@ -1500,6 +1601,10 @@ window.__ModuleLoader__.load({
       const name = state === null ? t('peakLoading') : (state.info.name || (state.isPeak ? t('peakPeak') : t('peakOff')));
       const when = state === null || state.nextAt === null ? t('peakNextNone') : t('peakNext', { time: durationText(state.nextInMs, t) });
       const label = name + ' · ' + when;
+      // The countdown rides beside the rate, but only where the column can hold
+      // it: the owner reports a 56px rail as wide === false.
+      const next = state === null || state.nextAt === null ? null : durationText(state.nextInMs, t);
+      const wide = props.wide !== false;
 
       return h('div', { className: 'hp-icon' },
         h('style', null, CONTROL_CSS + PEAK_CSS),
@@ -1509,6 +1614,7 @@ window.__ModuleLoader__.load({
           'data-phase': state !== null && state.isPeak ? 'peak' : 'off',
           'data-special': state !== null && state.info.tone === 'special' ? '1' : '0',
           'data-open': state !== null && state.panelOpen ? '1' : '0',
+          'data-wide': wide ? '1' : '0',
           title: label,
           'aria-label': label,
           'aria-haspopup': 'dialog',
@@ -1517,7 +1623,9 @@ window.__ModuleLoader__.load({
         },
           badge === null
             ? h('span', { className: 'hp-peak-dot', 'aria-hidden': true })
-            : h('span', { className: 'hp-peak-badge' }, badge)));
+            : h('span', { className: 'hp-peak-badge' }, badge),
+          next === null ? null : h('span', { className: 'hp-peak-when', 'aria-hidden': true },
+            watchIcon(), h('span', null, next))));
     }
 
     /** One rate, the few conditions behind it, and the model it follows. */
@@ -1554,7 +1662,7 @@ window.__ModuleLoader__.load({
         rows.push(h('div', { className: 'hp-peak-row', key: label },
           h('span', { className: 'hp-peak-key' }, label),
           h('span', { className: 'hp-peak-lines' },
-            lines.map((line, index) => h('span', { key: line }, (index === 0 ? '' : '· ') + line)))));
+            lines.map((line) => h('span', { key: line }, line)))));
       };
       push(t('peakHours'), state.hours);
       push(t('peakDaysLabel'), state.days);
@@ -1874,6 +1982,14 @@ window.__ModuleLoader__.load({
         ));
     }
 
+    /**
+     * The elapsed share of the interval, as the percentage the bottle colour reads:
+     * 0% is a full glass just drunk, 100% is the reminder coming due.
+     */
+    function waterHeat(level) {
+      return (Math.min(1, Math.max(0, level)) * 100).toFixed(1) + '%';
+    }
+
     function WaterButton(props) {
       const store = props.water;
       const t = typeof props.t === 'function' ? props.t : props.boundT;
@@ -1891,6 +2007,7 @@ window.__ModuleLoader__.load({
           type: 'button',
           className: 'hp-btn',
           'data-due': state.due ? '1' : '0',
+          style: { '--hp-heat': waterHeat(level) },
           title: label,
           'aria-label': label,
           'aria-expanded': state.due || state.manualOpen ? 'true' : 'false',
@@ -1903,20 +2020,67 @@ window.__ModuleLoader__.load({
           state.due ? h('span', { className: 'hp-dot', 'aria-hidden': true }) : null));
     }
 
+    /**
+     * The retained days: today's live count first, then the archived ones. Day
+     * names are relative only when they really are adjacent, so a gap left by a
+     * closed browser reads as a date instead of a false "yesterday".
+     */
+    function WaterHistory(props) {
+      const state = props.state;
+      const t = props.t;
+      const rows = [{ day: state.day, glasses: state.glasses, live: true }].concat(normalizeWaterHistory(state.history));
+      const dayName = (entry) => {
+        if (entry.live) return t('waterToday');
+        if (entry.day === dayKeyAgo(1)) return t('waterYesterday');
+        const parts = WATER_DAY_KEY.exec(entry.day);
+        return parts ? Number(parts[2]) + '/' + Number(parts[3]) : entry.day;
+      };
+      const count = (glasses) => (glasses === 1
+        ? t('waterGlassOne', { count: glasses })
+        : t('waterGlassMany', { count: glasses }));
+
+      return h('div', { className: 'hp-hist' },
+        h('div', { className: 'hp-hist-title' }, t('waterHistory', { days: WATER_HISTORY_DAYS })),
+        rows.map((entry) => h('div', {
+          className: 'hp-day',
+          key: entry.live ? 'today' : entry.day,
+          'data-live': entry.live ? '1' : '0',
+        },
+          h('span', { className: 'hp-day-name' }, dayName(entry)),
+          h('span', { className: 'hp-day-count' }, count(entry.glasses)))),
+        rows.length === 1 ? h('div', { className: 'hp-hist-empty' }, t('waterHistoryEmpty')) : null);
+    }
+
     function WaterPrompt(props) {
       const store = props.water;
       const t = typeof props.t === 'function' ? props.t : props.boundT;
       const state = useStore(store);
       const featureState = useStore(props.features || FEATURES_ALWAYS_ON);
+      const confirmRef = React.useRef(null);
+      // The modal hands the keyboard straight to Confirm, so Enter answers the
+      // reminder without reaching for the mouse. Hooks stay above the exits.
+      React.useEffect(() => {
+        if (state.due && confirmRef.current) confirmRef.current.focus();
+      }, [state.due]);
 
       if (!featureEnabled(featureState, 'water')) return null;
       if (!state.due && !state.manualOpen) return null;
       const minutes = Math.max(0, Math.ceil(state.remainingMs / 60000));
       const level = state.due ? 1 : Math.min(1, Math.max(0, 1 - state.remainingMs / WATER_INTERVAL_MS));
+      // A reminder that fired on its own centres itself and asks to be answered;
+      // one the user opened from the bottle stays a quiet card by the sidebar.
+      const modal = state.due;
 
-      return h('div', { className: 'hp-layer' },
+      return h('div', { className: 'hp-layer', 'data-modal': modal ? '1' : '0' },
         h('style', null, CONTROL_CSS + WATER_CSS),
-        h('div', { className: 'hp-card', role: 'status', 'aria-live': 'polite' },
+        h('div', {
+          className: 'hp-card',
+          style: { '--hp-heat': waterHeat(level) },
+          role: modal ? 'dialog' : 'status',
+          'aria-modal': modal ? 'true' : undefined,
+          'aria-live': modal ? undefined : 'polite',
+          'aria-label': modal ? t('waterDueTitle') : undefined,
+        },
           h('div', { className: 'hp-head' },
             h('span', { className: 'hp-icon' }, bottleIcon(level)),
             h('span', { className: 'hp-title' }, state.due ? t('waterDueTitle') : t('water'))),
@@ -1927,13 +2091,15 @@ window.__ModuleLoader__.load({
             h('button', {
               type: 'button',
               className: 'hp-accept',
+              ref: confirmRef,
               onClick: store.drink,
             }, t('waterDrank')),
             h('button', {
               type: 'button',
               className: 'hp-later',
               onClick: state.due ? store.later : store.close,
-            }, state.due ? t('waterLater', { minutes: WATER_SNOOZE_MINUTES }) : t('waterClose')))));
+            }, state.due ? t('waterLater', { minutes: WATER_SNOOZE_MINUTES }) : t('waterClose'))),
+          h(WaterHistory, { state, t })));
     }
 
     /** The sound control: opens the menu that names every mode. */
